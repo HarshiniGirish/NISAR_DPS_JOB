@@ -1,0 +1,8 @@
+maap-py
+earthaccess
+s3fs
+fsspec
+h5py
+numpy
+xarray
+h5netcdf
