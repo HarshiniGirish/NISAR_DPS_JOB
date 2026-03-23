@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
+
 """
 nisar_access_subset.py
 
-NISAR GCOV: stream (S3/HTTPS), subset variables, optional bbox subset, write Zarr intermediate.
+NISAR GCOV: stream (S3/HTTPS), subset variables, optional bbox subset,
+write Zarr intermediate.
 
 DPS notes:
 - Prefer S3 inside MAAP DPS/ADE (uses MAAP temporary creds).
-- HTTPS via earthaccess requires an initialized earthaccess store; in DPS this may not exist.
-  This script will auto-fallback to S3 when HTTPS auth is unavailable and an --s3_href is provided.
+- HTTPS via earthaccess requires an initialized earthaccess store; in DPS this
+  may not exist. This script will auto-fallback to S3 when HTTPS auth is
+  unavailable and an --s3_href is provided.
 """
 
 import argparse
@@ -16,10 +19,10 @@ import os
 import shutil
 from typing import List, Optional, Tuple
 
+import earthaccess
 import h5py
 import numpy as np
 import xarray as xr
-import earthaccess
 
 
 DEFAULT_GROUP = "/science/LSAR/GCOV/grids/frequencyA"
@@ -33,7 +36,10 @@ def _split_csv(s: str) -> List[str]:
 
 def parse_args():
     p = argparse.ArgumentParser(
-        description="NISAR GCOV: stream (S3/HTTPS), subset variables, optional bbox subset, write Zarr intermediate."
+        description=(
+            "NISAR GCOV: stream (S3/HTTPS), subset variables, optional bbox "
+            "subset, write Zarr intermediate."
+        )
     )
 
     # --- Granule hrefs (recommended: provide explicitly from driver/inputs) ---
@@ -67,7 +73,8 @@ def parse_args():
     p.add_argument(
         "--vars",
         default="HHHH",
-        help="Comma-separated list of variable dataset names inside --group (e.g., HHHH,HVHV,VVVV).",
+        help="Comma-separated list of variable dataset names inside --group "
+             "(e.g., HHHH,HVHV,VVVV).",
     )
 
     # Coordinate datasets
@@ -87,14 +94,30 @@ def parse_args():
     )
 
     # --- Output ---
-    p.add_argument("--out_dir", default=os.environ.get("OUTPUT_DIR", "/tmp/output"))
+    p.add_argument(
+        "--out_dir",
+        default=os.environ.get("USER_OUTPUT_DIR")
+        or os.environ.get("OUTPUT_DIR")
+        or "output",
+        help="Output directory. Prefers USER_OUTPUT_DIR/OUTPUT_DIR, else ./output",
+    )
     p.add_argument(
         "--out_name",
         default="nisar_subset.zarr",
         help="Name of the output Zarr directory (written under --out_dir).",
     )
 
-    return p.parse_args()
+    args = p.parse_args()
+
+    # Normalize accidental whitespace from UI / job params
+    args.https_href = (args.https_href or "").strip()
+    args.s3_href = (args.s3_href or "").strip()
+    args.bbox = (args.bbox or "").strip()
+    args.bbox_crs = (args.bbox_crs or "").strip()
+    args.out_dir = (args.out_dir or "").strip()
+    args.out_name = (args.out_name or "nisar_subset.zarr").strip()
+
+    return args
 
 
 def resolve_granule_hrefs(args) -> Tuple[str, str]:
@@ -109,11 +132,9 @@ def resolve_granule_hrefs(args) -> Tuple[str, str]:
         return https_href, s3_href
 
     # Fallback discovery (not ideal in DPS; prefer explicit hrefs)
-    # Attempt env-based login first; if unavailable, interactive may fail in DPS.
     try:
         earthaccess.login(strategy="environment")
     except Exception:
-        # last resort; may not work in headless DPS
         earthaccess.login()
 
     results = earthaccess.search_data(
@@ -121,24 +142,25 @@ def resolve_granule_hrefs(args) -> Tuple[str, str]:
         count=args.count,
         cloud_hosted=True,
     )
+
     if not results:
         raise RuntimeError(
-            "No granules found in search fallback. Provide --https_href and/or --s3_href explicitly."
+            "No granules found in search fallback. "
+            "Provide --https_href and/or --s3_href explicitly."
         )
 
     g = results[args.granule_index]
 
-    # external HTTPS
     https_links = g.data_links()
     https_href = https_links[0] if https_links else ""
 
-    # direct S3
     s3_links = g.data_links(access="direct")
     s3_href = s3_links[0] if s3_links else ""
 
     if not https_href and not s3_href:
         raise RuntimeError(
-            "Could not resolve any hrefs for granule. Provide --https_href/--s3_href explicitly."
+            "Could not resolve any hrefs for granule. "
+            "Provide --https_href/--s3_href explicitly."
         )
 
     return https_href, s3_href
@@ -147,17 +169,22 @@ def resolve_granule_hrefs(args) -> Tuple[str, str]:
 def parse_bbox(bbox_str: str) -> Optional[Tuple[float, float, float, float]]:
     if not (bbox_str or "").strip():
         return None
+
     parts = _split_csv(bbox_str)
     if len(parts) != 4:
         raise ValueError("bbox must be 'minx,miny,maxx,maxy'")
-    return tuple(float(x) for x in parts)  # type: ignore
+
+    return tuple(float(x) for x in parts)
 
 
 def bbox_to_slices(
-    x: np.ndarray, y: np.ndarray, bbox: Tuple[float, float, float, float]
+    x: np.ndarray,
+    y: np.ndarray,
+    bbox: Tuple[float, float, float, float],
 ) -> Tuple[slice, slice]:
     """
-    Convert bbox (minx,miny,maxx,maxy) into (yslice, xslice) based on 1D x/y coordinate vectors.
+    Convert bbox (minx,miny,maxx,maxy) into (yslice, xslice)
+    based on 1D x/y coordinate vectors.
 
     Assumptions:
     - xCoordinates and yCoordinates are 1D arrays aligned to dataset dims (y,x).
@@ -171,7 +198,6 @@ def bbox_to_slices(
     x_asc = x[0] < x[-1]
     y_asc = y[0] < y[-1]
 
-    # X indices where minx<=x<=maxx
     if x_asc:
         x0 = int(np.searchsorted(x, minx, side="left"))
         x1 = int(np.searchsorted(x, maxx, side="right"))
@@ -181,7 +207,6 @@ def bbox_to_slices(
         n = len(x)
         x0, x1 = n - x1, n - x0
 
-    # Y indices where miny<=y<=maxy
     if y_asc:
         y0 = int(np.searchsorted(y, miny, side="left"))
         y1 = int(np.searchsorted(y, maxy, side="right"))
@@ -191,7 +216,6 @@ def bbox_to_slices(
         n = len(y)
         y0, y1 = n - y1, n - y0
 
-    # Clamp
     x0 = max(0, min(len(x), x0))
     x1 = max(0, min(len(x), x1))
     y0 = max(0, min(len(y), y0))
@@ -199,7 +223,8 @@ def bbox_to_slices(
 
     if x1 <= x0 or y1 <= y0:
         raise RuntimeError(
-            "BBox resulted in empty slice. Check bbox is in same CRS/units as x/y coordinates."
+            "BBox resulted in empty slice. "
+            "Check bbox is in same CRS/units as x/y coordinates."
         )
 
     return slice(y0, y1), slice(x0, x1)
@@ -218,7 +243,11 @@ def open_file_like(
     - HTTPS: uses earthaccess fsspec session (requires earthaccess store initialized).
       If HTTPS isn't available in DPS, auto-falls back to S3 when possible.
     """
-    fsspec_params = {"cache_type": "blockcache", "block_size": 8 * 1024 * 1024}
+    fsspec_params = {
+        "cache_type": "blockcache",
+        "block_size": 8 * 1024 * 1024,
+    }
+
     h5py_driver_kwds = {
         "page_buf_size": 16 * 1024 * 1024,
         "rdcc_nbytes": 4 * 1024 * 1024,
@@ -227,17 +256,17 @@ def open_file_like(
     def open_https():
         if not https_href:
             raise RuntimeError("HTTPS href not available. Provide --https_href.")
-        # Ensure earthaccess store/session exists
+
         if getattr(earthaccess, "__store__", None) is None:
             try:
                 earthaccess.login(strategy="environment")
             except Exception:
-                # last resort; may not work in DPS
                 earthaccess.login()
 
         if getattr(earthaccess, "__store__", None) is None:
             raise RuntimeError(
-                "earthaccess session not initialized. In DPS, prefer S3 (use --access_mode s3 with --s3_href)."
+                "earthaccess session not initialized. "
+                "In DPS, prefer S3 (use --access_mode s3 with --s3_href)."
             )
 
         fs = earthaccess.get_fsspec_https_session()
@@ -246,6 +275,7 @@ def open_file_like(
     def open_s3():
         if not s3_href:
             raise RuntimeError("S3 href not available. Provide --s3_href.")
+
         from maap.maap import MAAP
         import s3fs
 
@@ -265,7 +295,6 @@ def open_file_like(
         mode = "s3" if s3_href else "https"
 
     if mode == "https":
-        # If HTTPS auth isn't available in DPS, fall back to S3 if present
         try:
             file_obj, chosen_mode, chosen_href = open_https()
         except Exception as e:
@@ -281,12 +310,16 @@ def open_file_like(
 
 def main():
     args = parse_args()
+
     os.makedirs(args.out_dir, exist_ok=True)
 
     https_href, s3_href = resolve_granule_hrefs(args)
 
     file_obj, driver_kwds, chosen_mode, chosen_href = open_file_like(
-        args.access_mode, https_href, s3_href, args.asf_s3_creds_url
+        args.access_mode,
+        https_href,
+        s3_href,
+        args.asf_s3_creds_url,
     )
 
     var_names = _split_csv(args.vars)
@@ -337,6 +370,8 @@ def main():
     )
 
     out_path = os.path.join(args.out_dir, args.out_name)
+    out_path = os.path.abspath(out_path)
+
     if os.path.exists(out_path):
         shutil.rmtree(out_path)
 
@@ -353,7 +388,10 @@ def main():
         "x_path": args.x_path,
         "y_path": args.y_path,
     }
+
     manifest_path = os.path.join(args.out_dir, "manifest.json")
+    manifest_path = os.path.abspath(manifest_path)
+
     with open(manifest_path, "w") as fp:
         json.dump(manifest, fp, indent=2)
 
@@ -361,6 +399,12 @@ def main():
     print("WROTE_MANIFEST:", manifest_path)
     print("SOURCE_MODE:", chosen_mode)
     print("SOURCE_HREF:", chosen_href)
+
+    print("OUTPUT_DIR:", os.path.abspath(args.out_dir))
+    try:
+        print("OUTPUT_CONTENTS:", sorted(os.listdir(args.out_dir)))
+    except Exception as e:
+        print("OUTPUT_LISTING_FAILED:", repr(e))
 
 
 if __name__ == "__main__":
