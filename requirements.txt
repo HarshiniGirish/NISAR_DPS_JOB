@@ -1,0 +1,11 @@
+earthaccess
+fsspec
+h5netcdf
+h5py
+maap-py
+numcodecs
+numpy
+requests
+s3fs
+xarray
+zarr
