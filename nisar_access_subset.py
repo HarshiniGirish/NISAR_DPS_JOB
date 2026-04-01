@@ -30,6 +30,12 @@ def _normalize_blank(value: Optional[str]) -> str:
 
 
 def _normalize_cli_args(argv: List[str]) -> List[str]:
+    """
+    Convert '--arg value' into '--arg=value' for known options.
+
+    This prevents argparse from misreading negative-leading values like:
+      --bbox -123.5,37.5,-122.5,38.5
+    """
     value_options = {
         "--access_mode",
         "--https_href",
@@ -201,6 +207,7 @@ def _get_s3_credentials(asf_s3_creds_url: str) -> dict:
     env_token = os.environ.get("AWS_SESSION_TOKEN")
 
     if env_key and env_secret and env_token:
+        print("USING_S3_CREDS_SOURCE: environment")
         return {
             "accessKeyId": env_key,
             "secretAccessKey": env_secret,
@@ -218,6 +225,7 @@ def _get_s3_credentials(asf_s3_creds_url: str) -> dict:
         if missing:
             raise RuntimeError(f"Missing expected AWS credential fields: {sorted(missing)}")
 
+        print("USING_S3_CREDS_SOURCE: maap")
         return creds
 
     except ModuleNotFoundError as exc:
@@ -237,11 +245,14 @@ def open_file_like(
     def open_https():
         if not https_href:
             raise RuntimeError("HTTPS href not available.")
+
         try:
             earthaccess.login(strategy="environment")
         except Exception:
             earthaccess.login()
+
         fs = earthaccess.get_fsspec_https_session()
+        print("OPENING_SOURCE_MODE: https")
         return fs.open(https_href, mode="rb", **fsspec_params), "https", https_href
 
     def open_s3():
@@ -251,24 +262,27 @@ def open_file_like(
         import s3fs
 
         creds = _get_s3_credentials(asf_s3_creds_url)
-        print("USING_S3_CREDS_SOURCE: env_or_maap")
-
         fs = s3fs.S3FileSystem(
             anon=False,
             key=creds["accessKeyId"],
             secret=creds["secretAccessKey"],
             token=creds["sessionToken"],
         )
+        print("OPENING_SOURCE_MODE: s3")
         return fs.open(s3_href, mode="rb", **fsspec_params), "s3", s3_href
 
-    chosen_mode = access_mode
-    if chosen_mode == "auto":
-        chosen_mode = "https" if https_href else "s3"
+    if access_mode == "https":
+        return open_https()
 
-    if chosen_mode == "https":
+    if access_mode == "s3":
+        return open_s3()
+
+    # auto mode only
+    if https_href:
         try:
             return open_https()
-        except Exception:
+        except Exception as exc:
+            print(f"HTTPS_OPEN_FAILED: {exc}")
             if s3_href:
                 return open_s3()
             raise
