@@ -30,6 +30,12 @@ def _normalize_blank(value: Optional[str]) -> str:
 
 
 def _normalize_cli_args(argv: List[str]) -> List[str]:
+    """
+    Convert '--arg value' into '--arg=value' for known options.
+
+    This prevents argparse from misreading negative-leading values like:
+      --bbox -123.5,37.5,-122.5,38.5
+    """
     value_options = {
         "--access_mode",
         "--https_href",
@@ -86,10 +92,10 @@ def parse_args() -> argparse.Namespace:
 
     raw_argv = sys.argv[1:]
     normalized_argv = _normalize_cli_args(raw_argv)
-    args = parser.parse_args(normalized_argv)
+
     print("RAW_ARGV:", raw_argv)
     print("NORMALIZED_ARGV:", normalized_argv)
-    
+
     args = parser.parse_args(normalized_argv)
 
     for attr in ("https_href", "s3_href", "bbox", "bbox_crs", "out_dir", "out_name"):
@@ -230,7 +236,9 @@ def open_file_like(
     def open_s3():
         if not s3_href:
             raise RuntimeError("S3 href not available.")
+
         import s3fs
+
         creds = _get_s3_credentials(asf_s3_creds_url)
         fs = s3fs.S3FileSystem(
             anon=False,
