@@ -1,9 +1,9 @@
-algorithm_name: nisar_access_subset
+\algorithm_name: nisar_access_subset
 algorithm_version: main
 algorithm_description: "MAAP OGC Application package that pulls a subset of variables from identified NISAR granules."
-code_repository: https://github.com/MAAP-Project/NISAR_DPS_JOB
-run_command: bash NISAR_DPS_JOB/run.sh
-build_command: bash NISAR_DPS_JOB/build.sh
+code_repository: https://github.com/HarshiniGirish/NISAR_DPS_JOB
+run_command: NISAR_DPS_JOB/run.sh
+build_command: NISAR_DPS_JOB/build.sh
 ram_min: 8
 cores_min: 2
 base_container_url: mas.maap-project.org/root/maap-workspaces/custom_images/maap_base:v5.0.0
@@ -14,32 +14,39 @@ inputs:
     doc: access_mode
     type: string
     default: auto
+
   - name: https_href
     label: https_href
     doc: https_href
     type: string
+
   - name: s3_href
     label: s3_href
     doc: s3_href
     type: string
+
   - name: vars
     label: vars
     doc: vars
     type: string
     default: HHHH
+
   - name: group
     label: group
     doc: group
     type: string
     default: /science/LSAR/GCOV/grids/frequencyA
+
   - name: bbox
     label: bbox
     doc: bbox
     type: string
+
   - name: bbox_crs
     label: bbox_crs
     doc: bbox_crs
     type: string
+
   - name: out_name
     label: out_name
     doc: out_name
