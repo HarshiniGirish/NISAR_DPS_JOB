@@ -30,13 +30,6 @@ def _normalize_blank(value: Optional[str]) -> str:
 
 
 def _normalize_cli_args(argv: List[str]) -> List[str]:
-    """
-    Convert '--arg value' into '--arg=value' for known string-valued options.
-
-    This avoids argparse misreading negative-leading values like:
-      --bbox -123.5,37.5,-122.5,38.5
-    as if '-123.5,...' were another option.
-    """
     value_options = {
         "--access_mode",
         "--https_href",
@@ -59,20 +52,12 @@ def _normalize_cli_args(argv: List[str]) -> List[str]:
     i = 0
     while i < len(argv):
         arg = argv[i]
-
-        if arg in value_options:
-            if i + 1 >= len(argv):
-                normalized.append(arg)
-                i += 1
-                continue
-
+        if arg in value_options and i + 1 < len(argv):
             normalized.append(f"{arg}={argv[i + 1]}")
             i += 2
             continue
-
         normalized.append(arg)
         i += 1
-
     return normalized
 
 
@@ -99,7 +84,13 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--out_name", default="nisar_subset.zarr")
 
-    args = parser.parse_args(_normalize_cli_args(sys.argv[1:]))
+    raw_argv = sys.argv[1:]
+    normalized_argv = _normalize_cli_args(raw_argv)
+
+    print("RAW_ARGV:", raw_argv)
+    print("NORMALIZED_ARGV:", normalized_argv)
+
+    args = parser.parse_args(normalized_argv)
 
     for attr in ("https_href", "s3_href", "bbox", "bbox_crs", "out_dir", "out_name"):
         setattr(args, attr, _normalize_blank(getattr(args, attr, "")))
@@ -229,21 +220,17 @@ def open_file_like(
     def open_https():
         if not https_href:
             raise RuntimeError("HTTPS href not available.")
-
         try:
             earthaccess.login(strategy="environment")
         except Exception:
             earthaccess.login()
-
         fs = earthaccess.get_fsspec_https_session()
         return fs.open(https_href, mode="rb", **fsspec_params), "https", https_href
 
     def open_s3():
         if not s3_href:
             raise RuntimeError("S3 href not available.")
-
         import s3fs
-
         creds = _get_s3_credentials(asf_s3_creds_url)
         fs = s3fs.S3FileSystem(
             anon=False,
@@ -293,7 +280,6 @@ def build_dataset(
         dpath = f"{group}/{var_name}"
         if dpath not in h5f:
             raise KeyError(f"Dataset not found: {dpath}")
-
         arr = h5f[dpath][yslice, xslice]
         data_vars[var_name] = (("y", "x"), np.asarray(arr))
 
