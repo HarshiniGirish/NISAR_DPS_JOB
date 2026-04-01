@@ -236,21 +236,41 @@ def _download_https_to_tempfile(https_href: str) -> Tuple[str, str, str]:
     except Exception:
         earthaccess.login()
 
-    auth = earthaccess.get_requests_https_session()
+    session = earthaccess.get_requests_https_session()
 
-    with auth.get(https_href, stream=True) as resp:
+    with session.get(https_href, stream=True) as resp:
         resp.raise_for_status()
-
-        suffix = ".h5"
-        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".h5") as tmp:
             for chunk in resp.iter_content(chunk_size=8 * 1024 * 1024):
                 if chunk:
                     tmp.write(chunk)
-            temp_path = tmp.name
+            local_path = tmp.name
 
     print("OPENING_SOURCE_MODE: https")
-    print("DOWNLOADED_TEMP_FILE:", temp_path)
-    return temp_path, "https", https_href
+    print("DOWNLOADED_TEMP_FILE:", local_path)
+    return local_path, "https", https_href
+
+
+def _download_s3_to_tempfile(s3_href: str, asf_s3_creds_url: str) -> Tuple[str, str, str]:
+    import s3fs
+
+    creds = _get_s3_credentials(asf_s3_creds_url)
+
+    fs = s3fs.S3FileSystem(
+        anon=False,
+        key=creds["accessKeyId"],
+        secret=creds["secretAccessKey"],
+        token=creds["sessionToken"],
+    )
+
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".h5") as tmp:
+        local_path = tmp.name
+
+    fs.get(s3_href, local_path)
+
+    print("OPENING_SOURCE_MODE: s3")
+    print("DOWNLOADED_TEMP_FILE:", local_path)
+    return local_path, "s3", s3_href
 
 
 def open_file_like(
@@ -259,51 +279,30 @@ def open_file_like(
     s3_href: str,
     asf_s3_creds_url: str,
 ) -> Tuple[str, str, str]:
-    def open_https():
+    if access_mode == "https":
         if not https_href:
-            raise RuntimeError("HTTPS href not available.")
+            raise RuntimeError("HTTPS mode requested but --https_href is missing.")
         return _download_https_to_tempfile(https_href)
 
-    def open_s3():
-        if not s3_href:
-            raise RuntimeError("S3 href not available.")
-
-        import s3fs
-
-        creds = _get_s3_credentials(asf_s3_creds_url)
-        fs = s3fs.S3FileSystem(
-            anon=False,
-            key=creds["accessKeyId"],
-            secret=creds["secretAccessKey"],
-            token=creds["sessionToken"],
-        )
-
-        suffix = ".h5"
-        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-            temp_path = tmp.name
-
-        fs.get(s3_href, temp_path)
-        print("OPENING_SOURCE_MODE: s3")
-        print("DOWNLOADED_TEMP_FILE:", temp_path)
-        return temp_path, "s3", s3_href
-
-    if access_mode == "https":
-        return open_https()
-
     if access_mode == "s3":
-        return open_s3()
+        if not s3_href:
+            raise RuntimeError("S3 mode requested but --s3_href is missing.")
+        return _download_s3_to_tempfile(s3_href, asf_s3_creds_url)
 
-    # auto mode only
+    # auto mode: try HTTPS first, then S3 only if needed
     if https_href:
         try:
-            return open_https()
+            return _download_https_to_tempfile(https_href)
         except Exception as exc:
             print(f"HTTPS_OPEN_FAILED: {exc}")
             if s3_href:
-                return open_s3()
+                return _download_s3_to_tempfile(s3_href, asf_s3_creds_url)
             raise
 
-    return open_s3()
+    if s3_href:
+        return _download_s3_to_tempfile(s3_href, asf_s3_creds_url)
+
+    raise RuntimeError("Neither https_href nor s3_href is available.")
 
 
 def build_dataset(
@@ -424,7 +423,7 @@ def main() -> None:
     print("SOURCE_HREF:", chosen_href)
     print("OUTPUT_DIR:", os.path.abspath(args.out_dir))
     print("OUTPUT_CONTENTS:", sorted(os.listdir(args.out_dir)))
-    
+
 
 if __name__ == "__main__":
     main()
