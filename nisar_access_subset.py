@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Subset selected variables from a NISAR GCOV granule and write a Zarr store."""
+
 
 import argparse
 import json
