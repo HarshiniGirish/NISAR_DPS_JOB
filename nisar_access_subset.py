@@ -2,10 +2,10 @@
 """
 Subset selected variables from a NISAR GCOV granule and write a Zarr store.
 
-Key behavior:
-- access_mode=https  -> use authenticated Earthaccess HTTPS session only
-- access_mode=s3     -> use S3 only
-- access_mode=auto   -> prefer HTTPS, then fall back to S3
+Behavior:
+- access_mode=https  -> authenticated HTTPS only
+- access_mode=s3     -> S3 only
+- access_mode=auto   -> try HTTPS first, then S3
 """
 
 import argparse
@@ -108,11 +108,11 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
-def _login_earthaccess() -> None:
+def _login_earthaccess():
     try:
-        earthaccess.login(strategy="environment")
+        return earthaccess.login(strategy="environment")
     except Exception:
-        earthaccess.login()
+        return earthaccess.login()
 
 
 def resolve_granule_hrefs(args: argparse.Namespace) -> Tuple[str, str]:
@@ -216,37 +216,24 @@ def _get_s3_credentials(asf_s3_creds_url: str) -> dict:
             "sessionToken": env_token,
         }
 
-    try:
-        from maap.maap import MAAP
+    from maap.maap import MAAP
 
-        maap = MAAP()
-        creds = maap.aws.earthdata_s3_credentials(asf_s3_creds_url)
-
-        required = {"accessKeyId", "secretAccessKey", "sessionToken"}
-        missing = required.difference(creds)
-        if missing:
-            raise RuntimeError(f"Missing expected AWS credential fields: {sorted(missing)}")
-
-        print("USING_S3_CREDS_SOURCE: maap")
-        return creds
-    except ModuleNotFoundError as exc:
-        raise RuntimeError(
-            "AWS credentials were not found in the environment, and maap-py is not installed."
-        ) from exc
+    maap = MAAP()
+    creds = maap.aws.earthdata_s3_credentials(asf_s3_creds_url)
+    print("USING_S3_CREDS_SOURCE: maap")
+    return creds
 
 
 def _download_https_to_tempfile(https_href: str) -> Tuple[str, str, str]:
     if not https_href:
         raise RuntimeError("HTTPS href not available.")
 
-    _login_earthaccess()
-    auth = earthaccess.login()
+    auth = _login_earthaccess()
     session = auth.get_session()
 
     with session.get(https_href, stream=True, allow_redirects=True, timeout=(30, 300)) as resp:
         resp.raise_for_status()
-        suffix = ".h5"
-        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".h5") as tmp:
             for chunk in resp.iter_content(chunk_size=8 * 1024 * 1024):
                 if chunk:
                     tmp.write(chunk)
@@ -264,7 +251,6 @@ def _download_s3_to_tempfile(s3_href: str, asf_s3_creds_url: str) -> Tuple[str, 
     import s3fs
 
     creds = _get_s3_credentials(asf_s3_creds_url)
-
     fs = s3fs.S3FileSystem(
         anon=False,
         key=creds["accessKeyId"],
@@ -272,8 +258,7 @@ def _download_s3_to_tempfile(s3_href: str, asf_s3_creds_url: str) -> Tuple[str, 
         token=creds["sessionToken"],
     )
 
-    suffix = ".h5"
-    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".h5") as tmp:
         temp_path = tmp.name
 
     fs.get(s3_href, temp_path)
@@ -295,7 +280,6 @@ def open_file_like(
     if access_mode == "s3":
         return _download_s3_to_tempfile(s3_href, asf_s3_creds_url)
 
-    # auto only
     if https_href:
         try:
             return _download_https_to_tempfile(https_href)
@@ -333,7 +317,6 @@ def build_dataset(
         dpath = f"{group}/{var_name}"
         if dpath not in h5f:
             raise KeyError(f"Dataset not found: {dpath}")
-
         arr = h5f[dpath][yslice, xslice]
         data_vars[var_name] = (("y", "x"), np.asarray(arr))
 
