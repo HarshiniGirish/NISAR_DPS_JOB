@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
-
+"""Subset selected variables from a NISAR GCOV granule and write a Zarr store."""
 
 import argparse
 import json
 import os
 import shutil
 import sys
+import tempfile
 from typing import List, Optional, Tuple
 
 import earthaccess
 import h5py
 import numpy as np
+import requests
 import xarray as xr
 import zarr
 
@@ -30,12 +32,6 @@ def _normalize_blank(value: Optional[str]) -> str:
 
 
 def _normalize_cli_args(argv: List[str]) -> List[str]:
-    """
-    Convert '--arg value' into '--arg=value' for known options.
-
-    This prevents argparse from misreading negative-leading values like:
-      --bbox -123.5,37.5,-122.5,38.5
-    """
     value_options = {
         "--access_mode",
         "--https_href",
@@ -234,26 +230,39 @@ def _get_s3_credentials(asf_s3_creds_url: str) -> dict:
         ) from exc
 
 
+def _download_https_to_tempfile(https_href: str) -> Tuple[str, str, str]:
+    try:
+        earthaccess.login(strategy="environment")
+    except Exception:
+        earthaccess.login()
+
+    auth = earthaccess.get_requests_https_session()
+
+    with auth.get(https_href, stream=True) as resp:
+        resp.raise_for_status()
+
+        suffix = ".h5"
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+            for chunk in resp.iter_content(chunk_size=8 * 1024 * 1024):
+                if chunk:
+                    tmp.write(chunk)
+            temp_path = tmp.name
+
+    print("OPENING_SOURCE_MODE: https")
+    print("DOWNLOADED_TEMP_FILE:", temp_path)
+    return temp_path, "https", https_href
+
+
 def open_file_like(
     access_mode: str,
     https_href: str,
     s3_href: str,
     asf_s3_creds_url: str,
-):
-    fsspec_params = {"cache_type": "blockcache", "block_size": 8 * 1024 * 1024}
-
+) -> Tuple[str, str, str]:
     def open_https():
         if not https_href:
             raise RuntimeError("HTTPS href not available.")
-
-        try:
-            earthaccess.login(strategy="environment")
-        except Exception:
-            earthaccess.login()
-
-        fs = earthaccess.get_fsspec_https_session()
-        print("OPENING_SOURCE_MODE: https")
-        return fs.open(https_href, mode="rb", **fsspec_params), "https", https_href
+        return _download_https_to_tempfile(https_href)
 
     def open_s3():
         if not s3_href:
@@ -268,8 +277,15 @@ def open_file_like(
             secret=creds["secretAccessKey"],
             token=creds["sessionToken"],
         )
+
+        suffix = ".h5"
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+            temp_path = tmp.name
+
+        fs.get(s3_href, temp_path)
         print("OPENING_SOURCE_MODE: s3")
-        return fs.open(s3_href, mode="rb", **fsspec_params), "s3", s3_href
+        print("DOWNLOADED_TEMP_FILE:", temp_path)
+        return temp_path, "s3", s3_href
 
     if access_mode == "https":
         return open_https()
@@ -348,21 +364,24 @@ def main() -> None:
     bbox = parse_bbox(args.bbox)
     https_href, s3_href = resolve_granule_hrefs(args)
 
-    file_obj, chosen_mode, chosen_href = open_file_like(
+    local_path, chosen_mode, chosen_href = open_file_like(
         args.access_mode,
         https_href,
         s3_href,
         args.asf_s3_creds_url,
     )
 
-    with file_obj as fp:
+    try:
         with h5py.File(
-            fp,
+            local_path,
             "r",
             rdcc_nbytes=4 * 1024 * 1024,
             page_buf_size=16 * 1024 * 1024,
         ) as h5f:
             ds = build_dataset(h5f, args.group, args.x_path, args.y_path, var_names, bbox)
+    finally:
+        if os.path.exists(local_path):
+            os.remove(local_path)
 
     ds.attrs.update(
         {
@@ -405,7 +424,7 @@ def main() -> None:
     print("SOURCE_HREF:", chosen_href)
     print("OUTPUT_DIR:", os.path.abspath(args.out_dir))
     print("OUTPUT_CONTENTS:", sorted(os.listdir(args.out_dir)))
-
+    
 
 if __name__ == "__main__":
     main()
