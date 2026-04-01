@@ -86,10 +86,10 @@ def parse_args() -> argparse.Namespace:
 
     raw_argv = sys.argv[1:]
     normalized_argv = _normalize_cli_args(raw_argv)
-
+    args = parser.parse_args(normalized_argv)
     print("RAW_ARGV:", raw_argv)
     print("NORMALIZED_ARGV:", normalized_argv)
-
+    
     args = parser.parse_args(normalized_argv)
 
     for attr in ("https_href", "s3_href", "bbox", "bbox_crs", "out_dir", "out_name"):
