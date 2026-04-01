@@ -1,60 +1,94 @@
-\algorithm_name: nisar_access_subset
-algorithm_version: main
-algorithm_description: "MAAP OGC Application package that pulls a subset of variables from identified NISAR granules."
-code_repository: https://github.com/HarshiniGirish/NISAR_DPS_JOB
-run_command: NISAR_DPS_JOB/run.sh
-build_command: NISAR_DPS_JOB/build.sh
-ram_min: 8
-cores_min: 2
-base_container_url: mas.maap-project.org/root/maap-workspaces/custom_images/maap_base:v5.0.0
+cwlVersion: v1.2
+class: CommandLineTool
+label: nisar_access_subset
+
+baseCommand:
+  - python
+  - /opt/app/nisar_access_subset.py
 
 inputs:
-  - name: access_mode
-    label: access_mode
-    doc: access_mode
+  access_mode:
     type: string
     default: auto
+    inputBinding:
+      prefix: --access_mode
 
-  - name: https_href
-    label: https_href
-    doc: https_href
-    type: string
+  https_href:
+    type: string?
+    inputBinding:
+      prefix: --https_href
 
-  - name: s3_href
-    label: s3_href
-    doc: s3_href
-    type: string
+  s3_href:
+    type: string?
+    inputBinding:
+      prefix: --s3_href
 
-  - name: vars
-    label: vars
-    doc: vars
+  short_name:
+    type: string?
+    default: NISAR_L2_GCOV_BETA_V1
+    inputBinding:
+      prefix: --short_name
+
+  count:
+    type: int?
+    default: 10
+    inputBinding:
+      prefix: --count
+
+  granule_index:
+    type: int?
+    default: 0
+    inputBinding:
+      prefix: --granule_index
+
+  asf_s3_creds_url:
+    type: string?
+    default: https://nisar.asf.earthdatacloud.nasa.gov/s3credentials
+    inputBinding:
+      prefix: --asf_s3_creds_url
+
+  vars:
     type: string
     default: HHHH
+    inputBinding:
+      prefix: --vars
 
-  - name: group
-    label: group
-    doc: group
+  group:
     type: string
     default: /science/LSAR/GCOV/grids/frequencyA
+    inputBinding:
+      prefix: --group
 
-  - name: bbox
-    label: bbox
-    doc: bbox
-    type: string
+  x_path:
+    type: string?
+    default: /science/LSAR/GCOV/grids/frequencyA/xCoordinates
+    inputBinding:
+      prefix: --x_path
 
-  - name: bbox_crs
-    label: bbox_crs
-    doc: bbox_crs
-    type: string
+  y_path:
+    type: string?
+    default: /science/LSAR/GCOV/grids/frequencyA/yCoordinates
+    inputBinding:
+      prefix: --y_path
 
-  - name: out_name
-    label: out_name
-    doc: out_name
+  bbox:
+    type: string?
+    inputBinding:
+      prefix: --bbox
+
+  bbox_crs:
+    type: string?
+    inputBinding:
+      prefix: --bbox_crs
+
+  out_name:
     type: string
     default: nisar_subset.zarr
+    inputBinding:
+      prefix: --out_name
 
 outputs:
-  - name: out
+  out:
     type: Directory
-
-outdir_max: 20
+    outputBinding:
+      glob: output
