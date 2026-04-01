@@ -1,4 +1,3 @@
-
 #!/usr/bin/env python3
 """Subset selected variables from a NISAR GCOV granule and write a Zarr store."""
 
@@ -6,6 +5,7 @@ import argparse
 import json
 import os
 import shutil
+import sys
 from typing import List, Optional, Tuple
 
 import earthaccess
@@ -29,6 +29,53 @@ def _normalize_blank(value: Optional[str]) -> str:
     return "" if value in {"none", "None", "null", "NULL", '""', "''"} else value
 
 
+def _normalize_cli_args(argv: List[str]) -> List[str]:
+    """
+    Convert '--arg value' into '--arg=value' for known string-valued options.
+
+    This avoids argparse misreading negative-leading values like:
+      --bbox -123.5,37.5,-122.5,38.5
+    as if '-123.5,...' were another option.
+    """
+    value_options = {
+        "--access_mode",
+        "--https_href",
+        "--s3_href",
+        "--short_name",
+        "--count",
+        "--granule_index",
+        "--asf_s3_creds_url",
+        "--group",
+        "--vars",
+        "--x_path",
+        "--y_path",
+        "--bbox",
+        "--bbox_crs",
+        "--out_dir",
+        "--out_name",
+    }
+
+    normalized: List[str] = []
+    i = 0
+    while i < len(argv):
+        arg = argv[i]
+
+        if arg in value_options:
+            if i + 1 >= len(argv):
+                normalized.append(arg)
+                i += 1
+                continue
+
+            normalized.append(f"{arg}={argv[i + 1]}")
+            i += 2
+            continue
+
+        normalized.append(arg)
+        i += 1
+
+    return normalized
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Subset variables from a NISAR GCOV granule and write an intermediate Zarr store."
@@ -40,29 +87,33 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--count", type=int, default=10)
     parser.add_argument("--granule_index", type=int, default=0)
     parser.add_argument("--asf_s3_creds_url", default=DEFAULT_ASF_S3_CREDS_URL)
-
     parser.add_argument("--group", default=DEFAULT_GROUP)
     parser.add_argument("--vars", default="HHHH")
     parser.add_argument("--x_path", default=DEFAULT_X)
     parser.add_argument("--y_path", default=DEFAULT_Y)
-
     parser.add_argument("--bbox", default="")
     parser.add_argument("--bbox_crs", default="")
-
-    parser.add_argument("--out_dir", default=os.environ.get("USER_OUTPUT_DIR") or os.environ.get("OUTPUT_DIR") or "output")
+    parser.add_argument(
+        "--out_dir",
+        default=os.environ.get("USER_OUTPUT_DIR") or os.environ.get("OUTPUT_DIR") or "output",
+    )
     parser.add_argument("--out_name", default="nisar_subset.zarr")
 
-    args = parser.parse_args()
+    args = parser.parse_args(_normalize_cli_args(sys.argv[1:]))
+
     for attr in ("https_href", "s3_href", "bbox", "bbox_crs", "out_dir", "out_name"):
         setattr(args, attr, _normalize_blank(getattr(args, attr, "")))
+
     if not args.out_name:
         args.out_name = "nisar_subset.zarr"
+
     return args
 
 
 def resolve_granule_hrefs(args: argparse.Namespace) -> Tuple[str, str]:
     https_href = args.https_href
     s3_href = args.s3_href
+
     if https_href or s3_href:
         return https_href, s3_href
 
@@ -76,27 +127,35 @@ def resolve_granule_hrefs(args: argparse.Namespace) -> Tuple[str, str]:
         count=args.count,
         cloud_hosted=True,
     )
+
     if not results:
         raise RuntimeError("No granules found. Provide --https_href and/or --s3_href explicitly.")
 
     if args.granule_index >= len(results):
-        raise IndexError(f"--granule_index {args.granule_index} is out of range for {len(results)} result(s).")
+        raise IndexError(
+            f"--granule_index {args.granule_index} is out of range for {len(results)} result(s)."
+        )
 
     granule = results[args.granule_index]
     https_links = granule.data_links() or []
     s3_links = granule.data_links(access="direct") or []
+
     return (https_links[0] if https_links else "", s3_links[0] if s3_links else "")
 
 
 def parse_bbox(value: str) -> Optional[Tuple[float, float, float, float]]:
     if not value:
         return None
+
     parts = _split_csv(value)
     if len(parts) != 4:
         raise ValueError("bbox must be 'minx,miny,maxx,maxy'")
+
     minx, miny, maxx, maxy = (float(p) for p in parts)
+
     if minx >= maxx or miny >= maxy:
         raise ValueError("bbox min values must be smaller than max values")
+
     return minx, miny, maxx, maxy
 
 
@@ -106,6 +165,7 @@ def bbox_to_slices(
     bbox: Tuple[float, float, float, float],
 ) -> Tuple[slice, slice]:
     minx, miny, maxx, maxy = bbox
+
     x = np.asarray(x).ravel()
     y = np.asarray(y).ravel()
 
@@ -137,7 +197,9 @@ def bbox_to_slices(
     y1 = max(0, min(len(y), y1))
 
     if x1 <= x0 or y1 <= y0:
-        raise RuntimeError("BBox produced an empty slice. Make sure it is in the same CRS/units as xCoordinates/yCoordinates.")
+        raise RuntimeError(
+            "BBox produced an empty slice. Make sure it is in the same CRS/units as xCoordinates/yCoordinates."
+        )
 
     return slice(y0, y1), slice(x0, x1)
 
@@ -147,10 +209,12 @@ def _get_s3_credentials(asf_s3_creds_url: str) -> dict:
 
     maap = MAAP()
     creds = maap.aws.earthdata_s3_credentials(asf_s3_creds_url)
+
     required = {"accessKeyId", "secretAccessKey", "sessionToken"}
     missing = required.difference(creds)
     if missing:
         raise RuntimeError(f"Missing expected AWS credential fields: {sorted(missing)}")
+
     return creds
 
 
@@ -165,16 +229,19 @@ def open_file_like(
     def open_https():
         if not https_href:
             raise RuntimeError("HTTPS href not available.")
+
         try:
             earthaccess.login(strategy="environment")
         except Exception:
             earthaccess.login()
+
         fs = earthaccess.get_fsspec_https_session()
         return fs.open(https_href, mode="rb", **fsspec_params), "https", https_href
 
     def open_s3():
         if not s3_href:
             raise RuntimeError("S3 href not available.")
+
         import s3fs
 
         creds = _get_s3_credentials(asf_s3_creds_url)
@@ -197,6 +264,7 @@ def open_file_like(
             if s3_href:
                 return open_s3()
             raise
+
     return open_s3()
 
 
@@ -225,6 +293,7 @@ def build_dataset(
         dpath = f"{group}/{var_name}"
         if dpath not in h5f:
             raise KeyError(f"Dataset not found: {dpath}")
+
         arr = h5f[dpath][yslice, xslice]
         data_vars[var_name] = (("y", "x"), np.asarray(arr))
 
@@ -248,6 +317,7 @@ def build_dataset(
 
 def main() -> None:
     args = parse_args()
+
     os.makedirs(args.out_dir, exist_ok=True)
 
     var_names = _split_csv(args.vars)
@@ -256,6 +326,7 @@ def main() -> None:
 
     bbox = parse_bbox(args.bbox)
     https_href, s3_href = resolve_granule_hrefs(args)
+
     file_obj, chosen_mode, chosen_href = open_file_like(
         args.access_mode,
         https_href,
@@ -302,6 +373,7 @@ def main() -> None:
         "y_path": args.y_path,
         "zarr_consolidated": True,
     }
+
     manifest_path = os.path.abspath(os.path.join(args.out_dir, "manifest.json"))
     with open(manifest_path, "w", encoding="utf-8") as fp:
         json.dump(manifest, fp, indent=2)
