@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-"""Subset selected variables from a NISAR GCOV granule and write a Zarr store."""
+"""
+Subset selected variables from a NISAR GCOV granule and write a Zarr store.
+
+Key behavior:
+- access_mode=https  -> use authenticated Earthaccess HTTPS session only
+- access_mode=s3     -> use S3 only
+- access_mode=auto   -> prefer HTTPS, then fall back to S3
+"""
 
 import argparse
 import json
@@ -12,9 +19,7 @@ from typing import List, Optional, Tuple
 import earthaccess
 import h5py
 import numpy as np
-import requests
 import xarray as xr
-import zarr
 
 DEFAULT_GROUP = "/science/LSAR/GCOV/grids/frequencyA"
 DEFAULT_X = f"{DEFAULT_GROUP}/xCoordinates"
@@ -103,6 +108,13 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
+def _login_earthaccess() -> None:
+    try:
+        earthaccess.login(strategy="environment")
+    except Exception:
+        earthaccess.login()
+
+
 def resolve_granule_hrefs(args: argparse.Namespace) -> Tuple[str, str]:
     https_href = args.https_href
     s3_href = args.s3_href
@@ -110,17 +122,13 @@ def resolve_granule_hrefs(args: argparse.Namespace) -> Tuple[str, str]:
     if https_href or s3_href:
         return https_href, s3_href
 
-    try:
-        earthaccess.login(strategy="environment")
-    except Exception:
-        earthaccess.login()
+    _login_earthaccess()
 
     results = earthaccess.search_data(
         short_name=args.short_name,
         count=args.count,
         cloud_hosted=True,
     )
-
     if not results:
         raise RuntimeError("No granules found. Provide --https_href and/or --s3_href explicitly.")
 
@@ -145,7 +153,6 @@ def parse_bbox(value: str) -> Optional[Tuple[float, float, float, float]]:
         raise ValueError("bbox must be 'minx,miny,maxx,maxy'")
 
     minx, miny, maxx, maxy = (float(p) for p in parts)
-
     if minx >= maxx or miny >= maxy:
         raise ValueError("bbox min values must be smaller than max values")
 
@@ -158,7 +165,6 @@ def bbox_to_slices(
     bbox: Tuple[float, float, float, float],
 ) -> Tuple[slice, slice]:
     minx, miny, maxx, maxy = bbox
-
     x = np.asarray(x).ravel()
     y = np.asarray(y).ravel()
 
@@ -223,7 +229,6 @@ def _get_s3_credentials(asf_s3_creds_url: str) -> dict:
 
         print("USING_S3_CREDS_SOURCE: maap")
         return creds
-
     except ModuleNotFoundError as exc:
         raise RuntimeError(
             "AWS credentials were not found in the environment, and maap-py is not installed."
@@ -231,27 +236,31 @@ def _get_s3_credentials(asf_s3_creds_url: str) -> dict:
 
 
 def _download_https_to_tempfile(https_href: str) -> Tuple[str, str, str]:
-    try:
-        earthaccess.login(strategy="environment")
-    except Exception:
-        earthaccess.login()
+    if not https_href:
+        raise RuntimeError("HTTPS href not available.")
 
-    session = earthaccess.get_requests_https_session()
+    _login_earthaccess()
+    auth = earthaccess.login()
+    session = auth.get_session()
 
-    with session.get(https_href, stream=True) as resp:
+    with session.get(https_href, stream=True, allow_redirects=True, timeout=(30, 300)) as resp:
         resp.raise_for_status()
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".h5") as tmp:
+        suffix = ".h5"
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
             for chunk in resp.iter_content(chunk_size=8 * 1024 * 1024):
                 if chunk:
                     tmp.write(chunk)
-            local_path = tmp.name
+            temp_path = tmp.name
 
     print("OPENING_SOURCE_MODE: https")
-    print("DOWNLOADED_TEMP_FILE:", local_path)
-    return local_path, "https", https_href
+    print("DOWNLOADED_TEMP_FILE:", temp_path)
+    return temp_path, "https", https_href
 
 
 def _download_s3_to_tempfile(s3_href: str, asf_s3_creds_url: str) -> Tuple[str, str, str]:
+    if not s3_href:
+        raise RuntimeError("S3 href not available.")
+
     import s3fs
 
     creds = _get_s3_credentials(asf_s3_creds_url)
@@ -263,14 +272,15 @@ def _download_s3_to_tempfile(s3_href: str, asf_s3_creds_url: str) -> Tuple[str, 
         token=creds["sessionToken"],
     )
 
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".h5") as tmp:
-        local_path = tmp.name
+    suffix = ".h5"
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        temp_path = tmp.name
 
-    fs.get(s3_href, local_path)
+    fs.get(s3_href, temp_path)
 
     print("OPENING_SOURCE_MODE: s3")
-    print("DOWNLOADED_TEMP_FILE:", local_path)
-    return local_path, "s3", s3_href
+    print("DOWNLOADED_TEMP_FILE:", temp_path)
+    return temp_path, "s3", s3_href
 
 
 def open_file_like(
@@ -280,29 +290,22 @@ def open_file_like(
     asf_s3_creds_url: str,
 ) -> Tuple[str, str, str]:
     if access_mode == "https":
-        if not https_href:
-            raise RuntimeError("HTTPS mode requested but --https_href is missing.")
         return _download_https_to_tempfile(https_href)
 
     if access_mode == "s3":
-        if not s3_href:
-            raise RuntimeError("S3 mode requested but --s3_href is missing.")
         return _download_s3_to_tempfile(s3_href, asf_s3_creds_url)
 
-    # auto mode: prefer HTTPS first; only try S3 if HTTPS truly fails
+    # auto only
     if https_href:
         try:
             return _download_https_to_tempfile(https_href)
         except Exception as exc:
             print(f"HTTPS_OPEN_FAILED: {exc}")
-            if s3_href:
-                return _download_s3_to_tempfile(s3_href, asf_s3_creds_url)
-            raise
 
     if s3_href:
         return _download_s3_to_tempfile(s3_href, asf_s3_creds_url)
 
-    raise RuntimeError("Neither https_href nor s3_href is available.")
+    raise RuntimeError("Neither HTTPS nor S3 href was available.")
 
 
 def build_dataset(
@@ -330,6 +333,7 @@ def build_dataset(
         dpath = f"{group}/{var_name}"
         if dpath not in h5f:
             raise KeyError(f"Dataset not found: {dpath}")
+
         arr = h5f[dpath][yslice, xslice]
         data_vars[var_name] = (("y", "x"), np.asarray(arr))
 
@@ -353,7 +357,6 @@ def build_dataset(
 
 def main() -> None:
     args = parse_args()
-
     os.makedirs(args.out_dir, exist_ok=True)
 
     var_names = _split_csv(args.vars)
