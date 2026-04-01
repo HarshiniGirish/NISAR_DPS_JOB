@@ -21,6 +21,7 @@ import numpy
 import requests
 import xarray
 import zarr
+import numcodecs
 
 print("Environment validation successful.")
 print("earthaccess", earthaccess.__version__)
@@ -35,4 +36,5 @@ print("numpy", numpy.__version__)
 print("requests", requests.__version__)
 print("xarray", xarray.__version__)
 print("zarr", zarr.__version__)
+print("numcodecs", numcodecs.__version__)
 PY
