@@ -289,7 +289,7 @@ def open_file_like(
             raise RuntimeError("S3 mode requested but --s3_href is missing.")
         return _download_s3_to_tempfile(s3_href, asf_s3_creds_url)
 
-    # auto mode: try HTTPS first, then S3 only if needed
+    # auto mode: prefer HTTPS first; only try S3 if HTTPS truly fails
     if https_href:
         try:
             return _download_https_to_tempfile(https_href)
