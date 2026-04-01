@@ -6,6 +6,11 @@ Behavior:
 - access_mode=s3     -> MAAP/ASF temporary S3 credentials
 - access_mode=https  -> HTTPS only if non-interactive Earthaccess creds exist
 - access_mode=auto   -> prefer s3 in DPS, then https if explicitly available
+
+Also:
+- reprojects bbox to dataset CRS when bbox_crs is provided
+- checks bbox overlap against dataset extent before slicing
+- prints clearer debug information in job logs
 """
 
 import argparse
@@ -20,6 +25,7 @@ import earthaccess
 import h5py
 import numpy as np
 import xarray as xr
+from pyproj import CRS, Transformer
 
 DEFAULT_GROUP = "/science/LSAR/GCOV/grids/frequencyA"
 DEFAULT_X = f"{DEFAULT_GROUP}/xCoordinates"
@@ -108,7 +114,7 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
-def _earthaccess_available_noninteractive():
+def _earthaccess_available_noninteractive() -> bool:
     if os.environ.get("EARTHDATA_USERNAME") and os.environ.get("EARTHDATA_PASSWORD"):
         return True
     netrc_path = os.environ.get("NETRC") or os.path.expanduser("~/.netrc")
@@ -127,14 +133,29 @@ def _login_earthaccess_noninteractive():
     )
 
 
+def _warn_if_mismatched_hrefs(https_href: str, s3_href: str) -> None:
+    if not https_href or not s3_href:
+        return
+    https_name = os.path.basename(https_href)
+    s3_name = os.path.basename(s3_href)
+    if https_name != s3_name:
+        print("WARNING_MISMATCHED_HREFS:")
+        print("  HTTPS file:", https_name)
+        print("  S3 file   :", s3_name)
+        print("  These hrefs appear to point to different granules.")
+
+
 def resolve_granule_hrefs(args: argparse.Namespace) -> Tuple[str, str]:
     https_href = args.https_href
     s3_href = args.s3_href
 
     if https_href or s3_href:
+        _warn_if_mismatched_hrefs(https_href, s3_href)
         return https_href, s3_href
 
     auth = _login_earthaccess_noninteractive()
+    _ = auth  # keep for clarity
+
     results = earthaccess.search_data(
         short_name=args.short_name,
         count=args.count,
@@ -164,6 +185,47 @@ def parse_bbox(value: str) -> Optional[Tuple[float, float, float, float]]:
     if minx >= maxx or miny >= maxy:
         raise ValueError("bbox min values must be smaller than max values")
     return minx, miny, maxx, maxy
+
+
+def transform_bbox_if_needed(
+    bbox: Optional[Tuple[float, float, float, float]],
+    bbox_crs: str,
+    ds_crs_epsg,
+) -> Optional[Tuple[float, float, float, float]]:
+    if bbox is None:
+        return None
+
+    if not bbox_crs or ds_crs_epsg in (None, "", 0):
+        return bbox
+
+    src = CRS.from_user_input(bbox_crs)
+    dst = CRS.from_user_input(f"EPSG:{int(ds_crs_epsg)}")
+
+    if src == dst:
+        return bbox
+
+    minx, miny, maxx, maxy = bbox
+    transformer = Transformer.from_crs(src, dst, always_xy=True)
+
+    xs = [minx, minx, maxx, maxx]
+    ys = [miny, maxy, miny, maxy]
+    tx, ty = transformer.transform(xs, ys)
+
+    return (min(tx), min(ty), max(tx), max(ty))
+
+
+def bbox_overlaps_extent(
+    bbox: Tuple[float, float, float, float],
+    x: np.ndarray,
+    y: np.ndarray,
+) -> bool:
+    minx, miny, maxx, maxy = bbox
+    xmin, xmax = float(np.min(x)), float(np.max(x))
+    ymin, ymax = float(np.min(y)), float(np.max(y))
+
+    x_overlap = not (maxx < xmin or minx > xmax)
+    y_overlap = not (maxy < ymin or miny > ymax)
+    return x_overlap and y_overlap
 
 
 def bbox_to_slices(
@@ -204,7 +266,8 @@ def bbox_to_slices(
 
     if x1 <= x0 or y1 <= y0:
         raise RuntimeError(
-            "BBox produced an empty slice. Make sure it is in the same CRS/units as xCoordinates/yCoordinates."
+            "BBox produced an empty slice after overlap check. "
+            "Make sure it is in the same CRS/units as xCoordinates/yCoordinates."
         )
 
     return slice(y0, y1), slice(x0, x1)
@@ -224,6 +287,7 @@ def _get_s3_credentials(asf_s3_creds_url: str) -> dict:
         }
 
     from maap.maap import MAAP
+
     maap = MAAP()
     creds = maap.aws.earthdata_s3_credentials(asf_s3_creds_url)
     print("USING_S3_CREDS_SOURCE: maap")
@@ -286,7 +350,6 @@ def open_file_like(
     if access_mode == "s3":
         return _download_s3_to_tempfile(s3_href, asf_s3_creds_url)
 
-    # OPERA-style DPS preference: S3 first in MAAP
     if s3_href:
         try:
             return _download_s3_to_tempfile(s3_href, asf_s3_creds_url)
@@ -308,12 +371,45 @@ def build_dataset(
     y_path: str,
     var_names: List[str],
     bbox: Optional[Tuple[float, float, float, float]],
+    bbox_crs: str = "",
 ) -> xr.Dataset:
     x = h5f[x_path][()]
     y = h5f[y_path][()]
 
-    if bbox is not None:
-        yslice, xslice = bbox_to_slices(x, y, bbox)
+    attrs = {}
+    ds_epsg = None
+    proj_path = f"{group}/projection"
+    if proj_path in h5f:
+        proj = h5f[proj_path]
+        for key in ("epsg_code", "spatial_ref", "grid_mapping_name"):
+            if key in proj.attrs:
+                value = proj.attrs[key]
+                if isinstance(value, bytes):
+                    value = value.decode()
+                attrs[key] = value
+        ds_epsg = attrs.get("epsg_code")
+
+    print("DATASET_X_MINMAX:", float(np.min(x)), float(np.max(x)))
+    print("DATASET_Y_MINMAX:", float(np.min(y)), float(np.max(y)))
+    print("DATASET_EPSG:", ds_epsg)
+    print("INPUT_BBOX:", bbox)
+    print("INPUT_BBOX_CRS:", bbox_crs)
+
+    bbox_in_ds_crs = transform_bbox_if_needed(bbox, bbox_crs, ds_epsg)
+    print("BBOX_IN_DATASET_CRS:", bbox_in_ds_crs)
+
+    if bbox_in_ds_crs is not None:
+        if not bbox_overlaps_extent(bbox_in_ds_crs, x, y):
+            raise RuntimeError(
+                "BBox does not overlap granule extent. "
+                f"Dataset EPSG={ds_epsg}, "
+                f"x_range=({float(np.min(x))}, {float(np.max(x))}), "
+                f"y_range=({float(np.min(y))}, {float(np.max(y))}), "
+                f"input_bbox={bbox}, input_bbox_crs={bbox_crs}, "
+                f"bbox_in_dataset_crs={bbox_in_ds_crs}"
+            )
+
+        yslice, xslice = bbox_to_slices(x, y, bbox_in_ds_crs)
         x_sub = np.asarray(x)[xslice]
         y_sub = np.asarray(y)[yslice]
     else:
@@ -328,17 +424,6 @@ def build_dataset(
             raise KeyError(f"Dataset not found: {dpath}")
         arr = h5f[dpath][yslice, xslice]
         data_vars[var_name] = (("y", "x"), np.asarray(arr))
-
-    attrs = {}
-    proj_path = f"{group}/projection"
-    if proj_path in h5f:
-        proj = h5f[proj_path]
-        for key in ("epsg_code", "spatial_ref", "grid_mapping_name"):
-            if key in proj.attrs:
-                value = proj.attrs[key]
-                if isinstance(value, bytes):
-                    value = value.decode()
-                attrs[key] = value
 
     return xr.Dataset(
         data_vars=data_vars,
@@ -372,7 +457,15 @@ def main() -> None:
             rdcc_nbytes=4 * 1024 * 1024,
             page_buf_size=16 * 1024 * 1024,
         ) as h5f:
-            ds = build_dataset(h5f, args.group, args.x_path, args.y_path, var_names, bbox)
+            ds = build_dataset(
+                h5f,
+                args.group,
+                args.x_path,
+                args.y_path,
+                var_names,
+                bbox,
+                args.bbox_crs,
+            )
     finally:
         if os.path.exists(local_path):
             os.remove(local_path)
@@ -385,7 +478,7 @@ def main() -> None:
             "vars": ",".join(var_names),
             "bbox": args.bbox,
             "bbox_crs": args.bbox_crs,
-            "note": "bbox is assumed to be in the same CRS/units as xCoordinates/yCoordinates.",
+            "note": "bbox is transformed to dataset CRS when bbox_crs is provided.",
         }
     )
 
