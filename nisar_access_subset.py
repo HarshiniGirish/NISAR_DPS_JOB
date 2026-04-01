@@ -263,7 +263,7 @@ def open_file_like(
 
     chosen_mode = access_mode
     if chosen_mode == "auto":
-        chosen_mode = "s3" if s3_href else "https"
+        chosen_mode = "https" if https_href else "s3"
 
     if chosen_mode == "https":
         try:
