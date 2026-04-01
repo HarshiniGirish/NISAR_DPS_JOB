@@ -202,16 +202,37 @@ def bbox_to_slices(
 
 
 def _get_s3_credentials(asf_s3_creds_url: str) -> dict:
-    from maap.maap import MAAP
+    # 1) Prefer credentials already present in the runtime environment
+    env_key = os.environ.get("AWS_ACCESS_KEY_ID")
+    env_secret = os.environ.get("AWS_SECRET_ACCESS_KEY")
+    env_token = os.environ.get("AWS_SESSION_TOKEN")
 
-    maap = MAAP()
-    creds = maap.aws.earthdata_s3_credentials(asf_s3_creds_url)
+    if env_key and env_secret and env_token:
+        return {
+            "accessKeyId": env_key,
+            "secretAccessKey": env_secret,
+            "sessionToken": env_token,
+        }
 
-    required = {"accessKeyId", "secretAccessKey", "sessionToken"}
-    missing = required.difference(creds)
-    if missing:
-        raise RuntimeError(f"Missing expected AWS credential fields: {sorted(missing)}")
+    # 2) Fallback to maap-py only if available
+    try:
+        from maap.maap import MAAP  # type: ignore
 
+        maap = MAAP()
+        creds = maap.aws.earthdata_s3_credentials(asf_s3_creds_url)
+
+        required = {"accessKeyId", "secretAccessKey", "sessionToken"}
+        missing = required.difference(creds)
+        if missing:
+            raise RuntimeError(f"Missing expected AWS credential fields: {sorted(missing)}")
+
+        return creds
+    except ModuleNotFoundError:
+        raise RuntimeError(
+            "No AWS credentials found in environment, and maap-py is not installed. "
+            "Either provide AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY/AWS_SESSION_TOKEN "
+            "in the runtime environment or install maap-py."
+        )
     return creds
 
 
@@ -234,8 +255,21 @@ def open_file_like(
         return fs.open(https_href, mode="rb", **fsspec_params), "https", https_href
 
     def open_s3():
-        if not s3_href:
-            raise RuntimeError("S3 href not available.")
+    if not s3_href:
+        raise RuntimeError("S3 href not available.")
+
+    import s3fs
+
+    creds = _get_s3_credentials(asf_s3_creds_url)
+    print("USING_S3_CREDS_SOURCE:", "env_or_maap")
+
+    fs = s3fs.S3FileSystem(
+        anon=False,
+        key=creds["accessKeyId"],
+        secret=creds["secretAccessKey"],
+        token=creds["sessionToken"],
+    )
+    return fs.open(s3_href, mode="rb", **fsspec_params), "s3", s3_href
 
         import s3fs
 
