@@ -3,9 +3,9 @@
 Subset selected variables from a NISAR GCOV granule and write a Zarr store.
 
 Behavior:
-- access_mode=https  -> authenticated HTTPS only
-- access_mode=s3     -> S3 only
-- access_mode=auto   -> try HTTPS first, then S3
+- access_mode=s3     -> MAAP/ASF temporary S3 credentials
+- access_mode=https  -> HTTPS only if non-interactive Earthaccess creds exist
+- access_mode=auto   -> prefer s3 in DPS, then https if explicitly available
 """
 
 import argparse
@@ -108,11 +108,23 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
-def _login_earthaccess():
-    try:
+def _earthaccess_available_noninteractive():
+    if os.environ.get("EARTHDATA_USERNAME") and os.environ.get("EARTHDATA_PASSWORD"):
+        return True
+    netrc_path = os.environ.get("NETRC") or os.path.expanduser("~/.netrc")
+    return os.path.exists(netrc_path)
+
+
+def _login_earthaccess_noninteractive():
+    if os.environ.get("EARTHDATA_USERNAME") and os.environ.get("EARTHDATA_PASSWORD"):
         return earthaccess.login(strategy="environment")
-    except Exception:
+    netrc_path = os.environ.get("NETRC") or os.path.expanduser("~/.netrc")
+    if os.path.exists(netrc_path):
         return earthaccess.login()
+    raise RuntimeError(
+        "No non-interactive Earthaccess credentials available. "
+        "In DPS, use --access_mode s3 unless EDL creds are injected."
+    )
 
 
 def resolve_granule_hrefs(args: argparse.Namespace) -> Tuple[str, str]:
@@ -122,8 +134,7 @@ def resolve_granule_hrefs(args: argparse.Namespace) -> Tuple[str, str]:
     if https_href or s3_href:
         return https_href, s3_href
 
-    _login_earthaccess()
-
+    auth = _login_earthaccess_noninteractive()
     results = earthaccess.search_data(
         short_name=args.short_name,
         count=args.count,
@@ -140,22 +151,18 @@ def resolve_granule_hrefs(args: argparse.Namespace) -> Tuple[str, str]:
     granule = results[args.granule_index]
     https_links = granule.data_links() or []
     s3_links = granule.data_links(access="direct") or []
-
     return (https_links[0] if https_links else "", s3_links[0] if s3_links else "")
 
 
 def parse_bbox(value: str) -> Optional[Tuple[float, float, float, float]]:
     if not value:
         return None
-
     parts = _split_csv(value)
     if len(parts) != 4:
         raise ValueError("bbox must be 'minx,miny,maxx,maxy'")
-
     minx, miny, maxx, maxy = (float(p) for p in parts)
     if minx >= maxx or miny >= maxy:
         raise ValueError("bbox min values must be smaller than max values")
-
     return minx, miny, maxx, maxy
 
 
@@ -217,7 +224,6 @@ def _get_s3_credentials(asf_s3_creds_url: str) -> dict:
         }
 
     from maap.maap import MAAP
-
     maap = MAAP()
     creds = maap.aws.earthdata_s3_credentials(asf_s3_creds_url)
     print("USING_S3_CREDS_SOURCE: maap")
@@ -228,7 +234,7 @@ def _download_https_to_tempfile(https_href: str) -> Tuple[str, str, str]:
     if not https_href:
         raise RuntimeError("HTTPS href not available.")
 
-    auth = _login_earthaccess()
+    auth = _login_earthaccess_noninteractive()
     session = auth.get_session()
 
     with session.get(https_href, stream=True, allow_redirects=True, timeout=(30, 300)) as resp:
@@ -280,16 +286,19 @@ def open_file_like(
     if access_mode == "s3":
         return _download_s3_to_tempfile(s3_href, asf_s3_creds_url)
 
-    if https_href:
-        try:
-            return _download_https_to_tempfile(https_href)
-        except Exception as exc:
-            print(f"HTTPS_OPEN_FAILED: {exc}")
-
+    # OPERA-style DPS preference: S3 first in MAAP
     if s3_href:
-        return _download_s3_to_tempfile(s3_href, asf_s3_creds_url)
+        try:
+            return _download_s3_to_tempfile(s3_href, asf_s3_creds_url)
+        except Exception as exc:
+            print(f"S3_OPEN_FAILED: {exc}")
 
-    raise RuntimeError("Neither HTTPS nor S3 href was available.")
+    if https_href and _earthaccess_available_noninteractive():
+        return _download_https_to_tempfile(https_href)
+
+    raise RuntimeError(
+        "Could not open granule. In DPS, prefer S3 or inject non-interactive EDL credentials for HTTPS."
+    )
 
 
 def build_dataset(
